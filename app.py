@@ -3,15 +3,35 @@ import oracledb
 from datetime import datetime
 import base64
 import sys
-from pathlib import Path
+import os
 
-# Agregar el directorio raíz al path para importar constants
-sys.path.append(str(Path(__file__).parent.parent))
-from Utils.constants import DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_SERVICE, WEB_SERVICE_HOST, WEB_SERVICE_PORT
+try:
+    from Utils.constants import DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_SERVICE, WEB_SERVICE_HOST, WEB_SERVICE_PORT
+except ImportError:
+    # Fallback por si la ruta no es detectada, intentamos agregar el directorio actual
+    sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+    from Utils.constants import DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_SERVICE, WEB_SERVICE_HOST, WEB_SERVICE_PORT
 
 app = Flask(__name__)
 
-# Configuración de conexión
+class PrefixMiddleware(object):
+    def __init__(self, app, prefix=''):
+        self.app = app
+        self.prefix = prefix
+
+    def __call__(self, environ, start_response):
+        # Si la ruta empieza con el prefijo, lo quitamos para que Flask la reconozca
+        if environ['PATH_INFO'].startswith(self.prefix):
+            environ['PATH_INFO'] = environ['PATH_INFO'][len(self.prefix):]
+            environ['SCRIPT_NAME'] = self.prefix
+            return self.app(environ, start_response)
+        else:
+            # Si no tiene el prefijo, dejamos que pase (o devolvemos 404 si es estricto)
+            return self.app(environ, start_response)
+
+# IMPORTANTE: Reemplaza '/IClassSel_WebService' con el nombre EXACTO de tu carpeta/app en IIS
+app.wsgi_app = PrefixMiddleware(app.wsgi_app, prefix='/IClassSel_WebService')
+
 DB_CONFIG = {
     "user": DB_USER,
     "password": DB_PASSWORD,
@@ -25,20 +45,26 @@ def execute_query(sql, params=None, fetch_one=False):
                 cursor.execute(sql, params or {})
                 if fetch_one:
                     row = cursor.fetchone()
-                    if row and isinstance(row[-1], oracledb.LOB):
+                    if row: # Validación extra por si devuelve None
+                        # Convertir LOBs a texto/bytes automáticamente
                         row = list(row)
-                        row[-1] = row[-1].read()
+                        for i, col in enumerate(row):
+                            if isinstance(col, oracledb.LOB):
+                                row[i] = col.read()
                     return row
                 else:
                     rows = cursor.fetchall()
-                    for i, row in enumerate(rows):
-                        if row and isinstance(row[-1], oracledb.LOB):
-                            row = list(row)
-                            row[-1] = row[-1].read()
-                            rows[i] = tuple(row)
-                    return rows
+                    # Procesamiento de LOBs para listas
+                    processed_rows = []
+                    for row in rows:
+                        row_list = list(row)
+                        for i, col in enumerate(row_list):
+                            if isinstance(col, oracledb.LOB):
+                                row_list[i] = col.read()
+                        processed_rows.append(tuple(row_list))
+                    return processed_rows
     except oracledb.Error as error:
-        print(f"Error: {error}")
+        print(f"Error BD: {error}")
         return None
 
 def execute_non_query(sql, params=None):
@@ -48,11 +74,11 @@ def execute_non_query(sql, params=None):
                 cursor.execute(sql, params or {})
                 connection.commit()
     except oracledb.Error as error:
-        print(f"Error: {error}")
-        
+        print(f"Error BD: {error}")
+
 @app.route('/api/example', methods=['GET'])
 def example():
-    return jsonify({"message": "Hello, World!"})
+    return jsonify({"message": "Hello, World! Oracle Configured."})
 
 @app.route('/student/<username>', methods=['GET'])
 def get_student(username):
